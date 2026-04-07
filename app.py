@@ -2,7 +2,6 @@ import os
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-import json
 import plotly.express as px
 
 os.environ["TZ"] = "Asia/Kuala_Lumpur"
@@ -17,35 +16,27 @@ DEFAULT_LEAD_TIME = {
 }
 
 # =========================
-# 🔥 自动识别 header（关键）
+# 自动识别 header
 # =========================
 def detect_header(file):
     raw = pd.read_excel(file, header=None, engine="openpyxl")
-
     for i, row in raw.iterrows():
         row_str = row.astype(str)
-
-        if row_str.str.contains("Main Part", case=False).any() or \
-           row_str.str.contains("Job", case=False).any():
+        if row_str.str.contains("Main Part", case=False).any():
             return i
-
-    return 5  # fallback
+    return 5
 
 def load_excel(files):
     dfs = []
-
     for f in files:
-        header_row = detect_header(f)
-
-        df = pd.read_excel(f, header=header_row, engine="openpyxl")
+        h = detect_header(f)
+        df = pd.read_excel(f, header=h, engine="openpyxl")
         df.columns = df.columns.astype(str).str.strip()
-
         dfs.append(df)
-
     return pd.concat(dfs, ignore_index=True)
 
 # =========================
-# 🔥 自动列 mapping
+# 自动列 mapping
 # =========================
 def find_col(df, keywords):
     for col in df.columns:
@@ -67,7 +58,7 @@ def map_columns(df):
     }
 
 # =========================
-# 🔥 Step解析（含merge修复）
+# Step解析（含merge）
 # =========================
 def extract_steps(row):
     steps = []
@@ -109,12 +100,26 @@ def progress(row, colmap):
     return int(100 * steps.index(cur) / len(steps))
 
 # =========================
-# 🔥 Customer自动识别
+# Customer识别
 # =========================
 def get_customer(row, colmap):
     if colmap["main"] and pd.notna(row[colmap["main"]]):
         return str(row[colmap["main"]]).split("-")[0]
     return None
+
+# =========================
+# Engineering判断（🔥关键修复）
+# =========================
+def is_engineering_required(row, colmap):
+    no_job = colmap["job"] and pd.isna(row[colmap["job"]])
+
+    no_step = all(
+        pd.isna(row[c])
+        for c in row.index
+        if "step" in str(c).lower() or "unnamed" in str(c).lower()
+    )
+
+    return no_job and no_step
 
 # =========================
 # 登录
@@ -130,8 +135,6 @@ if "data" not in st.session_state:
     st.session_state.data = None
 if "cal" not in st.session_state:
     st.session_state.cal = {}
-if "log" not in st.session_state:
-    st.session_state.log = []
 if "complete_time" not in st.session_state:
     st.session_state.complete_time = {}
 
@@ -144,18 +147,17 @@ if files:
     st.session_state.data = load_excel(files)
 
 if st.session_state.data is None:
-    st.warning("请上传 Excel")
+    st.warning("请上传Excel")
     st.stop()
 
 df_raw = st.session_state.data.copy()
 colmap = map_columns(df_raw)
 
-# 🔍 Debug（防空表关键）
-st.sidebar.write("Columns:", df_raw.columns.tolist())
+# Debug
 st.sidebar.write("Mapping:", colmap)
 
 # =========================
-# Filter
+# Filter（不会再吃掉数据）
 # =========================
 if colmap["category"]:
     cats = df_raw[colmap["category"]].dropna().unique()
@@ -173,21 +175,23 @@ df["Status"] = df["ETA"].apply(lambda x: "⚠️ Delayed" if x < datetime.now() 
 df["Progress"] = df.apply(lambda r: progress(r, colmap), axis=1)
 df["Customer"] = df.apply(lambda r: get_customer(r, colmap), axis=1)
 
-st.write("Rows:", len(df))
-
 # =========================
 # Tabs
 # =========================
-tabs = st.tabs(["All","Dept","Gantt","Customer"])
+tabs = st.tabs([
+"📋 All Items","🏭 Department","📅 Gantt","⚠️ Delayed",
+"📊 Customer","🛠️ Engineering"
+])
 
 # =========================
-# All
+# All Items
 # =========================
 with tabs[0]:
-    st.dataframe(df.head(200))
+    st.write("Filtered:", len(df), " | Raw:", len(df_raw))
+    st.dataframe(df.sort_values("ETA"))
 
 # =========================
-# Dept
+# Department
 # =========================
 with tabs[1]:
     dept = st.selectbox("Dept", df["Current Step"].dropna().unique())
@@ -216,9 +220,27 @@ with tabs[2]:
             st.plotly_chart(fig)
 
 # =========================
-# Customer
+# Delayed
 # =========================
 with tabs[3]:
+    d = df[df["Status"]=="⚠️ Delayed"]
+    st.dataframe(d)
+
+# =========================
+# Customer
+# =========================
+with tabs[4]:
     if colmap["exwork"]:
         df["Month"] = pd.to_datetime(df[colmap["exwork"]]).dt.to_period("M")
         st.dataframe(df.groupby(["Customer","Month"]).size())
+
+# =========================
+# Engineering（🔥你刚刚的问题修复）
+# =========================
+with tabs[5]:
+    st.title("Engineering WB Required")
+
+    eng_df = df_raw[df_raw.apply(lambda r: is_engineering_required(r, colmap), axis=1)]
+
+    st.write("Total:", len(eng_df))
+    st.dataframe(eng_df)
