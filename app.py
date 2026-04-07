@@ -108,18 +108,37 @@ def get_customer(row, colmap):
     return None
 
 # =========================
-# Engineering判断（🔥关键修复）
+# 🔥 Base Part（核心逻辑）
 # =========================
-def is_engineering_required(row, colmap):
-    no_job = colmap["job"] and pd.isna(row[colmap["job"]])
+def get_base_part(row, colmap):
+    if colmap["part"] and pd.notna(row[colmap["part"]]):
+        val = str(row[colmap["part"]])
+    elif colmap["main"] and pd.notna(row[colmap["main"]]):
+        val = str(row[colmap["main"]])
+    else:
+        return None
 
-    no_step = all(
-        pd.isna(row[c])
-        for c in row.index
-        if "step" in str(c).lower() or "unnamed" in str(c).lower()
-    )
+    parts = val.split("-")
 
-    return no_job and no_step
+    if parts[-1].isdigit():
+        return "-".join(parts[:-1])
+
+    return val
+
+# =========================
+# 🔥 Engineering判断（最终正确逻辑）
+# =========================
+def is_engineering_required(row, df_all, colmap):
+    base = row["Base Part"]
+    if not base:
+        return False
+
+    has_job = df_all[
+        (df_all["Base Part"] == base) &
+        (df_all[colmap["job"]].notna())
+    ]
+
+    return has_job.empty
 
 # =========================
 # 登录
@@ -135,8 +154,6 @@ if "data" not in st.session_state:
     st.session_state.data = None
 if "cal" not in st.session_state:
     st.session_state.cal = {}
-if "complete_time" not in st.session_state:
-    st.session_state.complete_time = {}
 
 # =========================
 # 上传
@@ -153,11 +170,10 @@ if st.session_state.data is None:
 df_raw = st.session_state.data.copy()
 colmap = map_columns(df_raw)
 
-# Debug
 st.sidebar.write("Mapping:", colmap)
 
 # =========================
-# Filter（不会再吃掉数据）
+# Filter
 # =========================
 if colmap["category"]:
     cats = df_raw[colmap["category"]].dropna().unique()
@@ -167,8 +183,11 @@ else:
     df = df_raw
 
 # =========================
-# 计算
+# 🔥 计算字段
 # =========================
+df_raw["Base Part"] = df_raw.apply(lambda r: get_base_part(r, colmap), axis=1)
+df["Base Part"] = df.apply(lambda r: get_base_part(r, colmap), axis=1)
+
 df["Current Step"] = df.apply(lambda r: get_current_step(r, colmap), axis=1)
 df["ETA"] = df.apply(lambda r: calc_eta(r, st.session_state.cal), axis=1)
 df["Status"] = df["ETA"].apply(lambda x: "⚠️ Delayed" if x < datetime.now() else "On Track")
@@ -184,11 +203,14 @@ tabs = st.tabs([
 ])
 
 # =========================
-# All Items
+# All Items（去重）
 # =========================
 with tabs[0]:
-    st.write("Filtered:", len(df), " | Raw:", len(df_raw))
-    st.dataframe(df.sort_values("ETA"))
+    st.write("Filtered:", len(df), "| Raw:", len(df_raw))
+
+    df_unique = df.sort_values("ETA").drop_duplicates("Base Part")
+
+    st.dataframe(df_unique)
 
 # =========================
 # Department
@@ -203,7 +225,6 @@ with tabs[1]:
         if st.button(f"Complete {i}"):
             nxt = next_step(r,colmap)
             st.session_state.data.at[i,colmap["current"]] = nxt
-            st.session_state.complete_time[i]=datetime.now()
             st.rerun()
 
 # =========================
@@ -235,12 +256,16 @@ with tabs[4]:
         st.dataframe(df.groupby(["Customer","Month"]).size())
 
 # =========================
-# Engineering（🔥你刚刚的问题修复）
+# Engineering（最终正确）
 # =========================
 with tabs[5]:
     st.title("Engineering WB Required")
 
-    eng_df = df_raw[df_raw.apply(lambda r: is_engineering_required(r, colmap), axis=1)]
+    eng_df = df_raw[
+        df_raw.apply(lambda r: is_engineering_required(r, df_raw, colmap), axis=1)
+    ]
+
+    eng_df = eng_df.drop_duplicates("Base Part")
 
     st.write("Total:", len(eng_df))
     st.dataframe(eng_df)
