@@ -1,7 +1,6 @@
 import os
 import streamlit as st
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 import json
 import plotly.express as px
@@ -13,59 +12,75 @@ st.set_page_config(layout="wide")
 # 默认工时
 # =========================
 DEFAULT_LEAD_TIME = {
-    "Laser Cut": 4,
-    "Laser Tube": 5,
-    "Punching": 3,
-    "Bending": 6,
-    "Welding": 8,
-    "Painting": 10,
-    "Assembly": 12
+    "Laser Cut": 4, "Laser Tube": 5, "Punching": 3,
+    "Bending": 6, "Welding": 8, "Painting": 10, "Assembly": 12
 }
 
 # =========================
-# 工具函数（👉 就是这里）
+# 🔥 自动识别 header（关键）
 # =========================
+def detect_header(file):
+    raw = pd.read_excel(file, header=None, engine="openpyxl")
+
+    for i, row in raw.iterrows():
+        row_str = row.astype(str)
+
+        if row_str.str.contains("Main Part", case=False).any() or \
+           row_str.str.contains("Job", case=False).any():
+            return i
+
+    return 5  # fallback
 
 def load_excel(files):
     dfs = []
+
     for f in files:
-        df = pd.read_excel(f, header=5, engine="openpyxl")
+        header_row = detect_header(f)
+
+        df = pd.read_excel(f, header=header_row, engine="openpyxl")
         df.columns = df.columns.astype(str).str.strip()
+
         dfs.append(df)
+
     return pd.concat(dfs, ignore_index=True)
 
-def get_col(df, names):
-    for n in names:
-        if n in df.columns:
-            return n
+# =========================
+# 🔥 自动列 mapping
+# =========================
+def find_col(df, keywords):
+    for col in df.columns:
+        for k in keywords:
+            if k.lower() in col.lower():
+                return col
     return None
 
 def map_columns(df):
     return {
-        "job": get_col(df, ["JobNum/Asm"]),
-        "part": get_col(df, ["Subpart Part Num"]),
-        "main": get_col(df, ["Main Part Num"]),
-        "category": get_col(df, ["Order Category"]),
-        "exwork": get_col(df, ["Exwork Date"]),
-        "order": get_col(df, ["Order Date"]),
-        "current": get_col(df, ["Current Operation"]),
-        "nest": get_col(df, ["Nesting Num"])
+        "job": find_col(df, ["job"]),
+        "part": find_col(df, ["subpart"]),
+        "main": find_col(df, ["main part"]),
+        "category": find_col(df, ["category"]),
+        "exwork": find_col(df, ["exwork","due"]),
+        "order": find_col(df, ["order date"]),
+        "current": find_col(df, ["current operation"]),
+        "nest": find_col(df, ["nesting"])
     }
 
-# 🔥 Step解析（修复 Step17 merge）
+# =========================
+# 🔥 Step解析（含merge修复）
+# =========================
 def extract_steps(row):
     steps = []
     for col in row.index:
         if pd.isna(row[col]):
             continue
-        if str(col).startswith("Step") or "Unnamed" in str(col):
+        if "step" in str(col).lower() or "unnamed" in str(col).lower():
             steps.append(row[col])
     return steps
 
 def get_current_step(row, colmap):
-    cur_col = colmap["current"]
-    if cur_col and pd.notna(row[cur_col]):
-        return row[cur_col]
+    if colmap["current"] and pd.notna(row[colmap["current"]]):
+        return row[colmap["current"]]
     steps = extract_steps(row)
     return steps[0] if steps else None
 
@@ -74,8 +89,8 @@ def next_step(row, colmap):
     cur = get_current_step(row, colmap)
     if cur in steps:
         i = steps.index(cur)
-        if i + 1 < len(steps):
-            return steps[i + 1]
+        if i+1 < len(steps):
+            return steps[i+1]
     return None
 
 def calc_eta(row, cal):
@@ -93,25 +108,19 @@ def progress(row, colmap):
         return 100
     return int(100 * steps.index(cur) / len(steps))
 
-# 🔥 新增：Customer 自动识别（你刚刚要的）
-def get_customer_from_main(row, colmap):
-    main_col = colmap.get("main")
-    if not main_col or pd.isna(row.get(main_col)):
-        return None
-    val = str(row[main_col])
-    return val.split("-")[0]
+# =========================
+# 🔥 Customer自动识别
+# =========================
+def get_customer(row, colmap):
+    if colmap["main"] and pd.notna(row[colmap["main"]]):
+        return str(row[colmap["main"]]).split("-")[0]
+    return None
 
 # =========================
 # 登录
 # =========================
-if "login" not in st.session_state:
-    st.session_state.login = False
-
 pwd = st.sidebar.text_input("Password", type="password")
-if pwd == os.getenv("APP_PASSWORD", "admin123"):
-    st.session_state.login = True
-
-if not st.session_state.login:
+if pwd != os.getenv("APP_PASSWORD", "admin123"):
     st.stop()
 
 # =========================
@@ -135,69 +144,81 @@ if files:
     st.session_state.data = load_excel(files)
 
 if st.session_state.data is None:
+    st.warning("请上传 Excel")
     st.stop()
 
 df_raw = st.session_state.data.copy()
 colmap = map_columns(df_raw)
 
+# 🔍 Debug（防空表关键）
+st.sidebar.write("Columns:", df_raw.columns.tolist())
+st.sidebar.write("Mapping:", colmap)
+
 # =========================
-# Category filter
+# Filter
 # =========================
 if colmap["category"]:
     cats = df_raw[colmap["category"]].dropna().unique()
-    selected = st.sidebar.multiselect(
-        "Order Category",
-        cats,
-        default=[c for c in cats if c in ["New Awarded","New Revision"]]
-    )
-    df = df_raw[df_raw[colmap["category"]].isin(selected)]
+    selected = st.sidebar.multiselect("Category", cats, default=cats[:2])
+    df = df_raw[df_raw[colmap["category"]].isin(selected)] if selected else df_raw
 else:
     df = df_raw
 
 # =========================
-# 计算字段
+# 计算
 # =========================
 df["Current Step"] = df.apply(lambda r: get_current_step(r, colmap), axis=1)
 df["ETA"] = df.apply(lambda r: calc_eta(r, st.session_state.cal), axis=1)
 df["Status"] = df["ETA"].apply(lambda x: "⚠️ Delayed" if x < datetime.now() else "On Track")
 df["Progress"] = df.apply(lambda r: progress(r, colmap), axis=1)
+df["Customer"] = df.apply(lambda r: get_customer(r, colmap), axis=1)
 
-# 🔥 Customer 自动生成
-df["Customer"] = df.apply(lambda r: get_customer_from_main(r, colmap), axis=1)
+st.write("Rows:", len(df))
 
 # =========================
 # Tabs
 # =========================
-tabs = st.tabs([
-"All Items","Department","Capacity","Sales","Gantt",
-"Delayed","Job Board","Stuck","Customer","Programmer","Engineering"
-])
+tabs = st.tabs(["All","Dept","Gantt","Customer"])
 
 # =========================
-# Customer Summary（完整版）
+# All
 # =========================
-with tabs[8]:
-    st.title("Customer Summary")
+with tabs[0]:
+    st.dataframe(df.head(200))
 
+# =========================
+# Dept
+# =========================
+with tabs[1]:
+    dept = st.selectbox("Dept", df["Current Step"].dropna().unique())
+    ddf = df[df["Current Step"]==dept]
+
+    for i,r in ddf.iterrows():
+        st.write(r.get(colmap["job"]), r.get(colmap["part"]))
+
+        if st.button(f"Complete {i}"):
+            nxt = next_step(r,colmap)
+            st.session_state.data.at[i,colmap["current"]] = nxt
+            st.session_state.complete_time[i]=datetime.now()
+            st.rerun()
+
+# =========================
+# Gantt
+# =========================
+with tabs[2]:
+    if colmap["job"]:
+        job = st.selectbox("Job", df[colmap["job"]].dropna().unique())
+        gdf = df[df[colmap["job"]]==job]
+
+        if not gdf.empty:
+            gdf["Start"]=datetime.now()
+            fig = px.timeline(gdf,x_start="Start",x_end="ETA",y=colmap["part"],color="Current Step")
+            st.plotly_chart(fig)
+
+# =========================
+# Customer
+# =========================
+with tabs[3]:
     if colmap["exwork"]:
-        main_parts = df[df[colmap["part"]].astype(str).str.endswith("-0")]
-
-        main_parts["Month"] = pd.to_datetime(main_parts[colmap["exwork"]]).dt.to_period("M")
-
-        summary = main_parts.groupby(["Customer","Month"]).size().reset_index(name="Count")
-        st.dataframe(summary)
-
-        cust = st.selectbox("Customer", summary["Customer"].unique())
-
-        cust_df = main_parts[main_parts["Customer"] == cust]
-
-        if colmap["order"]:
-            cust_df["OrderDate"] = pd.to_datetime(cust_df[colmap["order"]])
-
-            recent = cust_df[cust_df["OrderDate"] >= datetime.now() - timedelta(days=60)]
-            trend = recent.groupby(cust_df["OrderDate"].dt.date).size()
-
-            st.line_chart(trend)
-
-            last7 = cust_df[cust_df["OrderDate"] >= datetime.now() - timedelta(days=7)]
-            st.dataframe(last7)
+        df["Month"] = pd.to_datetime(df[colmap["exwork"]]).dt.to_period("M")
+        st.dataframe(df.groupby(["Customer","Month"]).size())
