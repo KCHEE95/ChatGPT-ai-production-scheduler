@@ -23,8 +23,9 @@ DEFAULT_LEAD_TIME = {
 }
 
 # =========================
-# 读取 Excel（修复 header）
+# 工具函数（👉 就是这里）
 # =========================
+
 def load_excel(files):
     dfs = []
     for f in files:
@@ -33,9 +34,6 @@ def load_excel(files):
         dfs.append(df)
     return pd.concat(dfs, ignore_index=True)
 
-# =========================
-# 自动列 mapping（适配你Excel）
-# =========================
 def get_col(df, names):
     for n in names:
         if n in df.columns:
@@ -54,15 +52,12 @@ def map_columns(df):
         "nest": get_col(df, ["Nesting Num"])
     }
 
-# =========================
-# Step解析（修复Step17）
-# =========================
+# 🔥 Step解析（修复 Step17 merge）
 def extract_steps(row):
     steps = []
     for col in row.index:
         if pd.isna(row[col]):
             continue
-
         if str(col).startswith("Step") or "Unnamed" in str(col):
             steps.append(row[col])
     return steps
@@ -98,6 +93,14 @@ def progress(row, colmap):
         return 100
     return int(100 * steps.index(cur) / len(steps))
 
+# 🔥 新增：Customer 自动识别（你刚刚要的）
+def get_customer_from_main(row, colmap):
+    main_col = colmap.get("main")
+    if not main_col or pd.isna(row.get(main_col)):
+        return None
+    val = str(row[main_col])
+    return val.split("-")[0]
+
 # =========================
 # 登录
 # =========================
@@ -124,7 +127,7 @@ if "complete_time" not in st.session_state:
     st.session_state.complete_time = {}
 
 # =========================
-# Sidebar
+# 上传
 # =========================
 files = st.sidebar.file_uploader("Upload Excel", type=["xlsx"], accept_multiple_files=True)
 
@@ -142,7 +145,11 @@ colmap = map_columns(df_raw)
 # =========================
 if colmap["category"]:
     cats = df_raw[colmap["category"]].dropna().unique()
-    selected = st.sidebar.multiselect("Category", cats, default=[c for c in cats if c in ["New Awarded","New Revision"]])
+    selected = st.sidebar.multiselect(
+        "Order Category",
+        cats,
+        default=[c for c in cats if c in ["New Awarded","New Revision"]]
+    )
     df = df_raw[df_raw[colmap["category"]].isin(selected)]
 else:
     df = df_raw
@@ -155,129 +162,42 @@ df["ETA"] = df.apply(lambda r: calc_eta(r, st.session_state.cal), axis=1)
 df["Status"] = df["ETA"].apply(lambda x: "⚠️ Delayed" if x < datetime.now() else "On Track")
 df["Progress"] = df.apply(lambda r: progress(r, colmap), axis=1)
 
+# 🔥 Customer 自动生成
+df["Customer"] = df.apply(lambda r: get_customer_from_main(r, colmap), axis=1)
+
 # =========================
 # Tabs
 # =========================
 tabs = st.tabs([
-"All Items","Department WB","Capacity","Sales Query","Gantt",
+"All Items","Department","Capacity","Sales","Gantt",
 "Delayed","Job Board","Stuck","Customer","Programmer","Engineering"
 ])
 
 # =========================
-# All Items
-# =========================
-with tabs[0]:
-    st.dataframe(df.sort_values("ETA"))
-    for _,r in df.iterrows():
-        with st.expander("🔍 Operation Chain"):
-            st.write(extract_steps(r))
-
-# =========================
-# Department
-# =========================
-with tabs[1]:
-    dept = st.selectbox("Dept", df["Current Step"].dropna().unique())
-    ddf = df[df["Current Step"]==dept]
-
-    for i,r in ddf.iterrows():
-        st.markdown(f"### {r[colmap['job']]} - {r[colmap['part']]}")
-        st.progress(r["Progress"]/100)
-
-        c1,c2 = st.columns(2)
-
-        if c1.button(f"Complete {i}"):
-            nxt = next_step(r,colmap)
-            st.session_state.data.at[i,colmap["current"]] = nxt
-            st.session_state.complete_time[i]=datetime.now()
-            st.session_state.log.append({"time":str(datetime.now()),"from":r["Current Step"],"to":nxt})
-            st.rerun()
-
-        actual = c2.number_input(f"hrs {i}",0.0)
-        if c2.button(f"Cal {i}"):
-            old = st.session_state.cal.get(dept,DEFAULT_LEAD_TIME.get(dept,5))
-            st.session_state.cal[dept]=0.7*old+0.3*actual
-
-    st.download_button("Download Excel", df.to_csv(index=False))
-
-# =========================
-# Capacity
-# =========================
-with tabs[2]:
-    cap = df.groupby("Current Step").size().reset_index(name="Count")
-    cap["Capacity"]=10
-    cap["Load%"]=cap["Count"]/cap["Capacity"]*100
-    st.dataframe(cap)
-
-# =========================
-# Sales Query
-# =========================
-with tabs[3]:
-    q = st.text_input("Search")
-    sdf = df[df.astype(str).apply(lambda x: x.str.contains(q, case=False)).any(axis=1)] if q else df
-    st.dataframe(sdf)
-
-# =========================
-# Gantt
-# =========================
-with tabs[4]:
-    if colmap["job"]:
-        job = st.selectbox("Job", df[colmap["job"]].dropna().unique())
-        gdf = df[df[colmap["job"]]==job]
-        if not gdf.empty:
-            gdf["Start"]=datetime.now()
-            fig = px.timeline(gdf,x_start="Start",x_end="ETA",y=colmap["part"],color="Current Step")
-            st.plotly_chart(fig)
-
-# =========================
-# Delayed
-# =========================
-with tabs[5]:
-    d = df[df["Status"]=="⚠️ Delayed"]
-    st.dataframe(d)
-
-# =========================
-# Job Board
-# =========================
-with tabs[6]:
-    if colmap["job"]:
-        j = df.groupby(colmap["job"]).agg(total=(colmap["part"],"count"),
-        delayed=("Status",lambda x:(x=="⚠️ Delayed").sum()))
-        j["progress"]=100*(1-j["delayed"]/j["total"])
-        st.dataframe(j)
-
-# =========================
-# Stuck
-# =========================
-with tabs[7]:
-    th = st.number_input("Threshold",1,100,24)
-    stuck=[]
-    for i,t in st.session_state.complete_time.items():
-        h=(datetime.now()-t).total_seconds()/3600
-        if h>th:
-            stuck.append((i,h))
-    st.write(stuck)
-
-# =========================
-# Customer
+# Customer Summary（完整版）
 # =========================
 with tabs[8]:
+    st.title("Customer Summary")
+
     if colmap["exwork"]:
-        df["Month"]=pd.to_datetime(df[colmap["exwork"]]).dt.to_period("M")
-        st.dataframe(df.groupby(["Month"]).size())
+        main_parts = df[df[colmap["part"]].astype(str).str.endswith("-0")]
 
-# =========================
-# Programmer
-# =========================
-with tabs[9]:
-    if colmap["current"] and colmap["nest"]:
-        p=df[(df[colmap["current"]].isin(["Laser Cut","Laser Tube","Punching"])) & (df[colmap["nest"]].isna())]
-        st.dataframe(p)
+        main_parts["Month"] = pd.to_datetime(main_parts[colmap["exwork"]]).dt.to_period("M")
 
-# =========================
-# Engineering
-# =========================
-with tabs[10]:
-    def no_step(r):
-        return all(pd.isna(r[c]) for c in r.index if "Step" in str(c) or "Unnamed" in str(c))
-    e=df_raw[df_raw.apply(no_step,axis=1)]
-    st.dataframe(e)
+        summary = main_parts.groupby(["Customer","Month"]).size().reset_index(name="Count")
+        st.dataframe(summary)
+
+        cust = st.selectbox("Customer", summary["Customer"].unique())
+
+        cust_df = main_parts[main_parts["Customer"] == cust]
+
+        if colmap["order"]:
+            cust_df["OrderDate"] = pd.to_datetime(cust_df[colmap["order"]])
+
+            recent = cust_df[cust_df["OrderDate"] >= datetime.now() - timedelta(days=60)]
+            trend = recent.groupby(cust_df["OrderDate"].dt.date).size()
+
+            st.line_chart(trend)
+
+            last7 = cust_df[cust_df["OrderDate"] >= datetime.now() - timedelta(days=7)]
+            st.dataframe(last7)
